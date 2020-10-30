@@ -1,0 +1,1 @@
+cd /Users/tyler/desktop/investin/data/ && /Users/tyler/opt/anaconda3/bin/python /Users/tyler/desktop/investin/data/tester.py >> /Users/tyler/desktop/investin/data/cron.log 2>&1
