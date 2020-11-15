@@ -29,6 +29,7 @@ def get_eod_min(ticker_name):
     data['Datetime'] = pd.to_datetime(data['Datetime'].values)
     data = data.drop_duplicates(subset=['Datetime'])
     data = data.reset_index(drop = True)
+    data = data.sort_values(by='Datetime')
     data.to_csv('stored_data/{}.csv'.format(ticker_name))
     
     

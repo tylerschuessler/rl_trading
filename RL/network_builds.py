@@ -30,44 +30,67 @@ def base_net(state_dim, dim_1, dim_2, type_, drop_out):
         if drop_out:
             layers.intsert(2, nn.Dropout(p = 0.3))
             layers.append(nn.Dropout(p = 0.3))
-    else:
-        print('not developed yet')
+        
     
     return layers
+
+default_params = {
     
+    'type_' : 'linear',
+    'dropout' : False,
+    'discrete' : False,
+    'std' : 0.0,
+    'hidden_dim' : 20,
+    'dim_1' : 64,
+    'dim_2' : 32,
+    'mini_batch_size' : 90
+}
 
 ###actor build###       
 class actor(nn.Module):
     '''
     The actor class
     '''
-    def __init__(self, state_dim, action_dim, type_ = 'linear', drop_out = False, discrete= True, std=0.0):
+    def __init__(self, state_dim, action_dim, params = default_params):
         '''
         input(s): dimensions of state and action, and the max action
         '''
         super(actor, self).__init__()
         
         ###for a discrete action space
-        self.discrete = discrete
+        self.discrete = params['discrete']
+        self.type_ = params['type_']
+        self.dropout = params['dropout']
+        self.std = params['std']
+        self.hidden_dim = params['hidden_dim']
+        self.dim_1 = params['dim_1']
+        self.dim_2 = params['dim_2']
+        self.mini_batch_size = params['mini_batch_size']
         
-        self.log_std = nn.Parameter(torch.ones(1, action_dim) * std)
+        self.log_std = nn.Parameter(torch.ones(1, action_dim) * self.std)
         
-        self.set_params()
         
-        self.set_up_layers(state_dim, action_dim, type_, drop_out)
+        self.set_up_layers(state_dim, action_dim)
         
         ###apply the intial weights if needed
         #self.apply(init_weights)
     
-    def set_up_layers(self, state_dim, action_dim, type_, drop_out):
+    def set_up_layers(self, state_dim, action_dim):
         '''
         make structure for the actor network
         '''
+        if self.type_ == 'linear':
 
-        layers = base_net(state_dim, self.dim_1, self.dim_2, type_, drop_out)
-        layers.append(nn.Linear(self.dim_2, action_dim))
+            layers = base_net(state_dim, self.dim_1, self.dim_2, self.type_, self.dropout)
+            layers.append(nn.Linear(self.dim_2, action_dim))
         
-        self.model = nn.Sequential(*layers)
+            self.model = nn.Sequential(*layers)
+        
+        elif self.type_ == 'LSTM':
+            self.lstm = nn.LSTM(state_dim, hidden_size = self.hidden_dim)
+            self.lin_cap = nn.Linear(self.hidden_dim, action_dim)
+            
+
     
     def forward(self, state):
         '''
@@ -85,37 +108,40 @@ class actor(nn.Module):
             dist  = Normal(mu, std)
             return dist
             
-    def set_params(self, dim_1 = 64, dim_2 = 32):
-        '''
-        set the parameters for the number of neurons
-        input(s): dims for neuron layers
-        '''
-        self.dim_1 = dim_1
-        self.dim_2 = dim_2
 
 ###critic build###
 class critic(nn.Module):
     '''
     critic class
     '''
-    def __init__(self, state_dim, type_ = 'linear', drop_out = False):
+    def __init__(self, state_dim, params = default_params):
         '''
         input(s): dimensions of state and action
         '''
         super(critic, self).__init__()
+        self.type_ = params['type_']
+        self.dropout = params['dropout']
+        self.hidden_dim = params['hidden_dim']
+        self.dim_1 = params['dim_1']
+        self.dim_2 = params['dim_2']
+        self.mini_batch_size = params['mini_batch_size']
         
-        self.set_params()
-        self.set_up_layers(state_dim, type_, drop_out)
+        self.set_up_layers(state_dim)
         
-        self.apply(init_weights)
     
-    def set_up_layers(self, state_dim, type_ , drop_out):
+    def set_up_layers(self, state_dim):
         '''
         make structure for the actor network
         '''
-        layers = base_net(state_dim, self.dim_1, self.dim_2, type_, drop_out)
-        layers.append(nn.Linear(self.dim_2, 1))
-        self.model = nn.Sequential(*layers)
+        if self.type_ == 'linear':
+            layers = base_net(state_dim, self.dim_1, self.dim_2, self.type_, self.dropout)
+            layers.append(nn.Linear(self.dim_2, 1))
+            self.model = nn.Sequential(*layers)
+
+        elif self.type_ == 'LSTM':
+            self.lstm = nn.LSTM(state_dim, hidden_size = self.hidden_dim)
+            self.lin_cap = nn.Linear(self.hidden_dim, 1)
+        
     
     def forward(self, state):
         '''
@@ -124,11 +150,62 @@ class critic(nn.Module):
         output(s): result of the critic network
         '''
         return self.model(state)
+
+
+
+
+class actor_LSTM(actor):
+    '''
+    LSTM actor class
+    need to overwrite the forward function
+    '''
+    def __init__(self, state_dim, action_dim, params = default_params):
         
-    def set_params(self, dim_1 = 64, dim_2 = 32):
+        super(actor_LSTM, self).__init__(state_dim, action_dim, params = params)
+
+        self.reset_hidden_cell(self.mini_batch_size)
+
+    def reset_hidden_cell(self, mini_batch_size):
         '''
-        set the parameters for the number of neurons
-        input(s): dims for neuron layers
+        resets the hidden cell state, or intializes it 
         '''
-        self.dim_1 = dim_1
-        self.dim_2 = dim_2
+        self.hidden_cell = (torch.zeros(1,mini_batch_size,self.hidden_dim), torch.zeros(1,mini_batch_size,self.hidden_dim))
+
+    def forward(self, x):
+        
+        lstm_out, self.hidden_cell = self.lstm(x, self.hidden_cell)
+        mu = self.lin_cap(lstm_out[-1])
+
+        if self.discrete:
+            probs = F.softmax(mu, dim = 1)
+            return Categorical(probs)
+        else: 
+            std   = self.log_std.exp().expand_as(mu)
+            dist  = Normal(mu, std)
+            return dist
+
+class critic_LSTM(critic):
+    '''
+    LSTM critic class
+    need to overwrite the forward function
+    '''
+    def __init__(self, state_dim, params = default_params):
+        
+        super(critic_LSTM, self).__init__(state_dim, params = params)
+        
+        self.reset_hidden_cell(self.mini_batch_size)
+    
+    def reset_hidden_cell(self, mini_batch_size):
+        '''
+        resets the hidden cell state, or intializes it 
+        '''
+        self.hidden_cell = (torch.zeros(1,mini_batch_size,self.hidden_dim), torch.zeros(1,mini_batch_size, self.hidden_dim))
+    
+    def forward(self, x):
+        #.view(len(x) ,1, -1)
+        lstm_out, self.hidden_cell = self.lstm(x, self.hidden_cell)
+        #lstm_out[-1].clone()
+        return self.lin_cap(lstm_out[-1])
+
+                      
+        

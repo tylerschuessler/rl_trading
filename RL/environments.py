@@ -26,6 +26,8 @@ class synthetic_environment():
         self.state_dim = 4
         self.n_pts = 50000
         self.data_df = self.build()
+
+        self.seq_len = 20
         self.sell_sigs = []
         self.buy_sigs = []
         self.monies_i = []
@@ -63,8 +65,9 @@ class synthetic_environment():
         initial_investment = 0.0
         shares_outstanding = 0.0
         
-        prelim_state = self.data_df.iloc[i].values.reshape(1, -1)
-        state = np.append(prelim_state, [[initial_investment, shares_outstanding, self.initial_cash]], axis = 1)
+        state = np.append(prelim_state, [[initial_investment, shares_outstanding, self.initial_cash] for _ in range(self.seq_len)], axis = 1)
+        prelim_state = self.data_df.iloc[i:i+self.seq_len].values
+
         self.current_state = state
         return state
     
@@ -112,18 +115,31 @@ class synthetic_environment():
         self.monies_i.append(investment)
         self.monies_c.append(cash)
         
+
         prelim_state = self.data_df.iloc[idx].values.reshape(1, -1)
         state = np.append(prelim_state, [[investment, shares, cash]], axis = 1)
         
         return self.rewards(state), state
-        
-               
+
+default_parameters = {
+    'reward_type' : 'basic_trade_penalty',
+    'discrete' : False,
+    'action_dim' : 2,
+    'initial_cash' : 10000.0,
+    'running_trades_bool' : True,
+    'delta_to_trade' : 0.25,
+    'running_trades_freq' : 0.05, #1 every 20 min
+    'c_log' : 0.0025,
+    'c' : 0.35,
+    'seq_len' : 1
+
+}              
         
 class environment():
     '''
     Class for defining the environment the agent interacts with
     '''
-    def __init__(self, data_df, mean, var, action_dim = 2, discrete = True):
+    def __init__(self, data_df, mean, var, params = default_parameters):
         '''
         input(s): data
         '''
@@ -131,19 +147,26 @@ class environment():
         self.data_df = data_df
         self.mean = mean
         self.var = var
-        self.discrete = discrete
+        
         
         cols = list(self.data_df.columns)
         self.l_i = cols.index('low')
         self.h_i = cols.index('high')
         self.c_i = cols.index('close')
         
-        #self.reward_type = 'excess_returns'
-        #self.reward_type = 'excess_returns_simple'
-        #self.reward_type = 'log_basic'
-        self.reward_type = 'basic_trade_penalty'
-        
-        self.action_dim = action_dim
+        self.reward_type = params['reward_type']
+        self.action_dim = params['action_dim']
+        self.discrete = params['discrete']
+        self.initial_cash = params['initial_cash']
+        self.running_trades_bool = params['running_trades_bool']
+        self.delta_to_trade = params['delta_to_trade']
+        self.running_trades_freq = params['running_trades_freq']
+        self.type_ = params['type_']
+        self.seq_len = params['seq_len']
+
+        self.c = params['c']
+        self.c_log = params['c_log']
+
         self.state_dim = self.data_df.shape[1]
         self.data_length = self.data_df.shape[0]
         
@@ -163,7 +186,7 @@ class environment():
         self.total_trades = []
         
         
-    def initial_state(self, random = False):
+    def initial_state(self, random = False, seed = 0):
         '''
         return an intial state, can be either random state or first state in the data
         
@@ -173,26 +196,35 @@ class environment():
         if random:
             i = np.random.randint(0, int(0.75*self.data_length))
         else:
-            i = 0
-        self.initial_cash = 10000.0
+            i = seed
+
+
         initial_investment = 0.0
         shares_outstanding = 0.0
         
         self.prev_cash = self.initial_cash
         
         num_trades = 0.0
-        prelim_state = self.data_df.iloc[i].values.reshape(1, -1)
+        prelim_state = self.data_df.iloc[i:i+self.seq_len].values
+
         running_trades = 3.0
-        
-        state = np.append(prelim_state, [[running_trades, num_trades, initial_investment, shares_outstanding, self.initial_cash]], axis = 1)
-        self.initial_shares = self.initial_cash/state[:,self.h_i].item()
+        if self.running_trades_bool:
+            state = np.append(prelim_state, [[running_trades, num_trades, initial_investment, shares_outstanding, self.initial_cash] for _ in range(self.seq_len)], axis = 1)
+        else:
+            state = np.append(prelim_state, [[num_trades, initial_investment, shares_outstanding, self.initial_cash] for _ in range(self.seq_len)], axis = 1)
+
+        self.initial_shares = self.initial_cash/state[:,self.h_i][-1]
+
+        self.state_dim = state.shape[1]
+
+        i = i +self.seq_len - 1
+
         return state, i
     
     def rewards(self, state, prev_cash, prev_investment, prev_close):
         '''
         calculate the returns for given action 
         '''
-        ###invested + penalty*cash - initial dollars
         penalty = 1.0
         invested = state[:,-3].item()
         cash = state[:,-1].item()
@@ -202,30 +234,30 @@ class environment():
         def log_clip(x):
             return np.log(np.clip(x, 1e-5, None))
         
-#         print('invested {}'.format(invested))
-#         print('prev_investment {}'.format(prev_investment))
-#         print('cash {}'.format(cash))
-#         print('prev_cash {}'.format(prev_cash))
-        
         if self.reward_type == 'basic':
             r = invested + penalty*cash - self.initial_cash
+
         elif self.reward_type == 'basic_trade_penalty':
-            r = invested + penalty*cash + trades*np.log((1 - 0.35)/(1+0.35))
+            part_a = invested + penalty*cash 
+            part_b = trades*np.log((1 - self.c)/(1+self.c))
+            
+            r = part_a + part_b
+            self.part_a.append(part_a)
+            self.part_b.append(part_b)
+
         elif self.reward_type == 'excess_returns':
             #np.log(close/prev_close)
-            sign = 1.0 #np.sign(close - prev_close)
-            small_ = 1e-4
+            sign = np.sign(close - prev_close)
             part_a = sign*((log_clip(invested)-log_clip(prev_investment)) - (log_clip(cash) - log_clip(prev_cash))) - (log_clip(close*self.initial_shares) - log_clip(prev_close*self.initial_shares)) 
-            part_b = trades*np.log((1 - 0.0025)/(1+0.0025))
+            part_b = trades*np.log((1 - self.c_log)/(1+self.c_log))
 
             r = part_a + part_b
             self.part_a.append(part_a)
             self.part_b.append(part_b)
             
         elif self.reward_type == 'excess_returns_simple':
-            small_ = 1e-4
             part_a = log_clip(invested+cash)-log_clip(prev_investment+prev_cash) - (log_clip(close*self.initial_shares) -log_clip(prev_close*self.initial_shares)) 
-            part_b = trades*np.log((1 - 0.0025)/(1+0.0025))
+            part_b = trades*np.log((1 - self.c_log)/(1+self.c_log))
             
             r = part_a + part_b
             
@@ -233,12 +265,21 @@ class environment():
             self.part_b.append(part_b)
             
         elif self.reward_type == 'log_basic':
-            small_ = 1e-4
             part_a = log_clip(invested+cash) - log_clip(close*self.initial_shares)
-            part_b = trades*np.log((1 - 0.0025)/(1+0.0025))
+            part_b = trades*np.log((1 - self.c_log)/(1+self.c_log))
             
             r = part_a + part_b
             
+            self.part_a.append(part_a)
+            self.part_b.append(part_b)
+
+        elif self.reward_type == 'log_returns_modified':
+            sign = np.sign(close - prev_close)
+            part_a = sign*(log_clip(invested) - log_clip(cash)) - log_clip(close*self.initial_shares)
+            part_b = trades*np.log((1 - self.c_log)/(1+self.c_log))
+
+            r = part_a +part_b
+
             self.part_a.append(part_a)
             self.part_b.append(part_b)
             
@@ -262,12 +303,18 @@ class environment():
         shares = state[:,-2].item()
         prev_cash = state[:,-1].item()
         trades = state[:,-4].item()
-        running_trades = state[:,-5].item()
         
+        #if there should be running trades
+        if self.running_trades_bool:
+            running_trades = state[:,-5].item()
+        else:
+            running_trades = 1.0
+        
+        #discrete vs continious actions
         if self.discrete:
             self.all_actions.append(action)
             ###buy/sell action transition from invested to divested or vice versa
-            cash, shares, investment, trades = self.action_select(action, prev_cash, shares, prev_investment, trades, running_trades, high, close, idx)     
+            cash, shares, investment, trades, running_trades = self.action_select(action, prev_cash, shares, prev_investment, trades, running_trades, high, close, idx)     
         else:
             self.all_actions.append([action[0], action[1]])
             cash, shares, investment, trades, running_trades = self.action_select_2(action, prev_cash, shares, prev_investment, trades, running_trades, high, close, low, idx) 
@@ -277,7 +324,11 @@ class environment():
         self.total_trades.append(trades)
         
         prelim_state = self.data_df.iloc[idx].values.reshape(1, -1)
-        state = np.append(prelim_state, [[running_trades, trades, investment, shares, cash]], axis = 1)
+        #make sure running trades is required
+        if self.running_trades_bool:
+            state = np.append(prelim_state, [[running_trades, trades, investment, shares, cash]], axis = 1)
+        else:
+            state = np.append(prelim_state, [[trades, investment, shares, cash]], axis = 1)
         
         return self.rewards(state, prev_cash, prev_investment, close), state
     
@@ -289,58 +340,57 @@ class environment():
         '''
         ###2 action dimensions
         if self.action_dim == 2:
-            if action == 0:
-                #print('buy/sell')
-                ###divest
-                if cash == 0.0:
-                    shares = 0.0
-                    cash += investment
-                    investment = 0.0
-                    
-                    self.profits.append(cash - self.prev_cash)
-                    self.prev_cash = cash
-                    
-                    self.sell_sigs.append([idx, close])
-                    
+            if running_trades >= 1.0:
+                if action == 0:
+                    ###divest
+                    if cash == 0.0:
+                        shares = 0.0
+                        cash += investment
+                        investment = 0.0
+
+                        self.sell_sigs.append([idx, close])
+                    ###invest    
+                    else:
+                        investment += cash
+                        shares = investment/high #use high to calc buy
+                        cash = 0.0
+                        
+                        self.buy_sigs.append([idx, close])
+                        
                     trades += 1
-                ###invest    
-                else:
-                    investment += cash
-                    shares = investment/high #use high to calc buy
-                    cash = 0.0
-                    
-                    self.buy_sigs.append([idx, close])
-                    
-                    trades += 1
+                    running_trades -= 1
+             
         ###3 action dimensions
         elif self.action_dim == 3:
-            ###divest
-            if action == 0:
+            if running_trades >= 1.0:
+                ###divest
+                if action == 0:
+                    if investment > 0:
+                        cash += investment
+                        investment = 0.0
+                        shares = 0.0
+
+                        self.sell_sigs.append([idx, close])
+                        trades += 1
+
+                        running_trades -= 1
                 
-                #cash = 0.2*investment
-                #investment = 0.8*investment
-                #shares = investment/high
-                if investment > 0:
-                    cash += investment
-                    investment = 0.0
-                    shares = 0.0
+                elif action == 1:
+                    if cash > 0:
+                        investment += cash
+                        shares = investment/high #use high to calc buy
+                        cash = 0.0
 
-                    self.sell_sigs.append([idx, close])
-                    trades += 1
-            
-            elif action == 1:
-                if cash > 0:
-                    investment += cash
-                    shares = investment/high #use high to calc buy
-                    cash = 0.0
+                        self.buy_sigs.append([idx, close])
+                        trades += 1
 
-                    self.buy_sigs.append([idx, close])
-                    trades += 1
-            
-            self.profits.append(cash+investment - self.prev_cash)
-            self.prev_cash = cash+investment
+                        running_trades -= 1
 
-        return cash, shares, investment, trades
+        running_trades += self.running_trades_freq
+        self.profits.append(cash+investment - self.prev_cash)
+        self.prev_cash = cash+investment
+
+        return cash, shares, investment, trades, running_trades
     
     def action_select_2(self, action, cash, shares, investment, trades, running_trades, high, close, low, idx):
         '''
@@ -348,7 +398,7 @@ class environment():
         
         input(s): action value, the cash value, the number of shares, investment amount
         '''
-        #if self.action_dim == 2:
+
         #portion invested
         total = cash + investment
 
@@ -358,7 +408,7 @@ class environment():
         diff_invest = new_investment - investment
         
         if running_trades >= 1.0:
-            if np.abs(diff_invest) >= 0.25*investment:
+            if np.abs(diff_invest) >= self.delta_to_trade*investment:
 
                 if diff_invest > 0:
                     shares += diff_invest/high
@@ -370,9 +420,9 @@ class environment():
                 investment = new_investment
                 cash = new_cash
                 trades += 1
-            running_trades -= 1
+                running_trades -= 1
 
-        running_trades += 0.05
+        running_trades += self.running_trades_freq
         self.profits.append(investment + cash - self.prev_cash)
         self.prev_cash = investment + cash
 
